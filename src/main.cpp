@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncMqttClient.h>
+#include <Ticker.h>
 
 #ifndef STRUCT_TREE
 #define STRUCT_TREE
@@ -11,6 +13,8 @@
 #include <LITTLEFS.h>
 
 #define FileFS LittleFS
+
+void connect_wifi();
 
 // ********************************* 继电器部分 *********************************
 #include <Arduino.h>
@@ -87,13 +91,17 @@ void _close_btn()
   RELAY_IF_EXEC = 0;
 }
 
-void power_btn(unsigned long delay)
+bool power_btn(unsigned long delay)
 {
+  if (delay < 0 || delay > 60 * 1000)
+  {
+    return false;
+  }
   if (RELAY_IF_EXEC)
   {
-    return;
+    return false;
   }
-  Serial.printf("power press. delay: %d \r\n", delay);
+  Serial.printf("power press. delay: %ld \r\n", delay);
   Serial.println("step0: Clear timer");
   os_timer_disarm(&os_timer);
 
@@ -104,6 +112,7 @@ void power_btn(unsigned long delay)
   Serial.println("step2: Sleep");
   os_timer_setfn(&os_timer, (ETSTimerFunc *)(_close_btn), NULL);
   os_timer_arm(&os_timer, delay, false);
+  return true;
 }
 
 // ********************************* 继电器部分END *********************************
@@ -114,13 +123,22 @@ const String CONFIG_FILENAME = "mqtt_conf.dat";
 
 struct MQTT_CONFIG
 {
-  char url[64];
+  bool enable;
+  char host[64];
+  int port;
   char username[32];
   char password[32];
   char subscribe_topic[128];
 };
 
 MQTT_CONFIG config;
+
+AsyncMqttClient mqttClient;
+Ticker mqttReconnectTimer;
+
+WiFiEventHandler wifiConnectHandler;
+WiFiEventHandler wifiDisconnectHandler;
+Ticker wifiReconnectTimer;
 
 void saveConfigData()
 {
@@ -150,7 +168,7 @@ void readConfigData()
     file.read((uint8_t *)&config, sizeof(config));
 
     file.close();
-    Serial.printf("Read OK. url: %s, topic: %s \r\n", config.url, config.subscribe_topic);
+    Serial.printf("Read OK. host: %s, topic: %s \r\n", config.host, config.subscribe_topic);
   }
   else
   {
@@ -161,7 +179,103 @@ void readConfigData()
   }
 }
 
-void init_mqtt_config()
+void connectToMqtt()
+{
+  Serial.println("Connecting to MQTT...");
+  mqttClient.connect();
+}
+
+void onWifiConnect(const WiFiEventStationModeGotIP &event)
+{
+  Serial.println("Connected to Wi-Fi.");
+  connectToMqtt();
+}
+
+void onWifiDisconnect(const WiFiEventStationModeDisconnected &event)
+{
+  Serial.println("Disconnected from Wi-Fi.");
+  mqttReconnectTimer.detach(); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
+  wifiReconnectTimer.once(2, connect_wifi);
+}
+
+void onMqttConnect(bool sessionPresent)
+{
+  Serial.println("Connected to MQTT.");
+  Serial.print("Session present: ");
+  Serial.println(sessionPresent);
+
+  uint16_t packetIdSub = mqttClient.subscribe(config.subscribe_topic, 1);
+  Serial.print("Subscribing at QoS 1, packetId: ");
+  Serial.println(packetIdSub);
+
+  uint16_t packetIdPub1 = mqttClient.publish("device/login", 1, true, "1");
+  Serial.print("Publishing at QoS 1, packetId: ");
+  Serial.println(packetIdPub1);
+}
+
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason)
+{
+  Serial.println("Disconnected from MQTT.");
+
+  if (WiFi.isConnected())
+  {
+    mqttReconnectTimer.once(2, connectToMqtt);
+  }
+}
+
+void onMqttSubscribe(uint16_t packetId, uint8_t qos)
+{
+  Serial.println("Subscribe acknowledged.");
+  Serial.print("  packetId: ");
+  Serial.println(packetId);
+  Serial.print("  qos: ");
+  Serial.println(qos);
+}
+
+void onMqttUnsubscribe(uint16_t packetId)
+{
+  Serial.println("Unsubscribe acknowledged.");
+  Serial.print("  packetId: ");
+  Serial.println(packetId);
+}
+
+void onMqttMessage(char *topic, char *payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total)
+{
+  Serial.println("Publish received.");
+  Serial.print("  topic: ");
+  Serial.println(topic);
+  Serial.print("  qos: ");
+  Serial.println(properties.qos);
+  Serial.print("  dup: ");
+  Serial.println(properties.dup);
+  Serial.print("  retain: ");
+  Serial.println(properties.retain);
+  Serial.print("  len: ");
+  Serial.println(len);
+  Serial.print("  index: ");
+  Serial.println(index);
+  Serial.print("  total: ");
+  Serial.println(total);
+
+  if (strcmp(topic, config.subscribe_topic) == 0)
+  {
+    unsigned long delay = strtoul(payload, NULL, 0);
+    power_btn(delay);
+  }
+  else
+  {
+    Serial.printf("not match. [%s]%d  [%s]%d  [%d].", topic, sizeof(topic), config.subscribe_topic, sizeof(config.subscribe_topic), strcmp(topic, config.subscribe_topic));
+  }
+}
+
+void onMqttPublish(uint16_t packetId)
+{
+  Serial.println("Publish acknowledged.");
+  Serial.print("  packetId: ");
+  Serial.println(packetId);
+}
+
+void init_mqtt()
 {
   // Initialize LittleFS
   if (!LittleFS.begin())
@@ -171,6 +285,32 @@ void init_mqtt_config()
   }
 
   readConfigData();
+
+  wifiConnectHandler = WiFi.onStationModeGotIP(onWifiConnect);
+  wifiDisconnectHandler = WiFi.onStationModeDisconnected(onWifiDisconnect);
+
+  mqttClient.onConnect(onMqttConnect);
+  mqttClient.onDisconnect(onMqttDisconnect);
+  mqttClient.onSubscribe(onMqttSubscribe);
+  mqttClient.onUnsubscribe(onMqttUnsubscribe);
+  mqttClient.onMessage(onMqttMessage);
+  mqttClient.onPublish(onMqttPublish);
+  mqttClient.setWill("device/logout", 1, false, "1", 1);
+
+  if (config.enable && config.username && config.username[0])
+  {
+    mqttClient.setCredentials(config.username, config.password);
+  }
+
+  if (config.enable && config.host && config.host[0])
+  {
+    Serial.printf("Load Mqtt on %s:%d \r\n", config.host, config.port);
+    mqttClient.setServer(config.host, config.port);
+  }
+  else
+  {
+    Serial.println("Mqtt is ignore");
+  }
 }
 
 // ********************************* MQTT部分END *********************************
@@ -293,11 +433,11 @@ void setup()
 
   Serial.printf("\r\nStartup. \r\n");
 
+  // read and init mqtt
+  init_mqtt();
+
   // Connect to Wi-Fi
   connect_wifi();
-
-  // read mqtt config file
-  init_mqtt_config();
 
   // Route for root / web page
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
@@ -310,15 +450,108 @@ void setup()
             {
               //List all parameters
               AsyncWebParameter *delayParam = request->getParam("delay");
-              Serial.printf("[GET] /power_btn delay: %d \r\n", delayParam->value().c_str());
+              Serial.printf("[GET] /power_btn delay: %s \r\n", delayParam->value().c_str());
               unsigned long delay = strtoul(delayParam->value().c_str(), NULL, 0);
-              if (delay < 0 || delay > 60 * 1000)
+              if (power_btn(delay))
               {
                 char *body = (char *)malloc(24);
                 sprintf(body, "delay error. %lu", delay);
                 request->send_P(500, "text/plain", body);
               }
-              power_btn(delay);
+              request->send_P(200, "text/plain", "success");
+            });
+
+  server.on("/mqtt", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+              String enable;
+              if (config.enable)
+              {
+                enable = "true";
+              }
+              else
+              {
+                enable = "false";
+              }
+              char *body = (char *)malloc(512);
+              sprintf(body,
+                      "{\"enable\": %s, \"host\": \"%s\", \"port\": %d, \"username\": \"%s\", \"password\": \"%s\", \"topic\": \"%s\"}",
+                      enable.c_str(),
+                      config.host,
+                      config.port,
+                      config.username,
+                      config.password,
+                      config.subscribe_topic);
+              request->send_P(200, "application/json", body);
+            });
+
+  server.on("/mqtt", HTTP_POST, [](AsyncWebServerRequest *request)
+            {
+              AsyncWebParameter *enableParam = request->getParam("enable", true);
+              AsyncWebParameter *hostParam = request->getParam("host", true);
+              AsyncWebParameter *portParam = request->getParam("port", true);
+              AsyncWebParameter *usernameParam = request->getParam("username", true);
+              AsyncWebParameter *passwordParam = request->getParam("password", true);
+              AsyncWebParameter *topicParam = request->getParam("topic", true);
+              Serial.printf("[POST] /mqtt ost: %s, port: %s, username: %s, password: %s, topic: %s \r\n",
+                            hostParam->value().c_str(),
+                            portParam->value().c_str(),
+                            usernameParam->value().c_str(),
+                            passwordParam->value().c_str(),
+                            topicParam->value().c_str());
+
+              // check
+              if (!(hostParam->value().c_str() && hostParam->value().c_str()[0]))
+              {
+                request->send_P(500, "text/plain", "host不能为空");
+                return;
+              }
+              if (!(portParam->value().c_str() && portParam->value().c_str()[0]))
+              {
+                request->send_P(500, "text/plain", "port不能为空");
+                return;
+              }
+              if (strlen(hostParam->value().c_str()) > 64)
+              {
+                request->send_P(500, "text/plain", "host过长");
+                return;
+              }
+
+              const char *enableStr = enableParam->value().c_str();
+              const char *host = hostParam->value().c_str();
+              int port = atoi(portParam->value().c_str());
+              const char *username = usernameParam->value().c_str();
+              const char *password = passwordParam->value().c_str();
+              const char *subscribe_topic = topicParam->value().c_str();
+
+              bool enable = false;
+              if (strcmp(enableStr, "true") == 0)
+              {
+                enable = true;
+              }
+              else if (strcmp(enableStr, "false") == 0)
+              {
+                enable = false;
+              }
+              else
+              {
+                request->send_P(500, "text/plain", "enable非法");
+                return;
+              }
+
+              if (port > 65534 || port < 1)
+              {
+                request->send_P(500, "text/plain", "port非法");
+                return;
+              }
+
+              config.enable = enable;
+              strcpy(config.host, host);
+              config.port = port;
+              strcpy(config.username, username);
+              strcpy(config.password, password);
+              strcpy(config.subscribe_topic, subscribe_topic);
+              saveConfigData();
+              init_mqtt();
               request->send_P(200, "text/plain", "success");
             });
 
@@ -329,5 +562,5 @@ void setup()
 
 void loop()
 {
-  delay(200);
+  delay(10);
 }

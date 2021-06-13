@@ -1,1 +1,80 @@
-<h1>hello</h1>
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1" name="viewport">
+  <title>btn</title>
+</head>
+
+<body>
+  <div>
+    <label>时间
+      <input id="time" type="number" name="time" value="500">
+    </label>
+    <button id="btn_exec">立即执行</button>
+  </div>
+  <br>
+  <div>
+    <P>目前，任何一个属性都需要写入，不写会无法保存</P>
+    <form id="form1" action="#">
+      <p>enable：<input name="enable" type="text" id="enable" /></p>
+      <p>HOST：<input name="host" type="text" id="host" /></p>
+      <p>PORT：<input name="port" type="text" id="port" /></p>
+      <p>Username：<input name="username" type="text" id="username" /></p>
+      <p>Password：<input name="password" type="text" id="password" /></p>
+      <p>Topic：<input name="topic" type="text" id="topic" /></p>
+      <p><input type="button" value="保存" onclick="login()"></p>
+    </form>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+  <script>
+    const baseUrl = ''
+    // 立即执行
+    $('#btn_exec').click(() => {
+      const delay = $('#time').val()
+      if (!delay || delay < 0 || delay > 60 * 1000) {
+        alert('delay 不合法')
+        return;
+      }
+      $.get(`${baseUrl}/power_btn?delay=${delay}`, function (data) {
+        console.log('data', data)
+        alert(data)
+      });
+    })
+
+    // 下发配置部分
+    $.ajax({
+      url: `${baseUrl}/mqtt`,
+      success: function (data) {
+        console.log(data)
+        $('#enable').val(data.enable)
+        $('#host').val(data.host)
+        $('#port').val(data.port)
+        $('#username').val(data.username)
+        $('#password').val(data.password)
+        $('#topic').val(data.topic)
+      },
+      dataType: 'json'
+    });
+
+    function login() {
+      $.ajax({
+        //几个参数需要注意一下
+        type: "POST",//方法类型
+        dataType: "text",//预期服务器返回的数据类型
+        url: `${baseUrl}/mqtt`,
+        data: $('#form1').serialize(),
+        success: function (result) {
+          console.log(result);
+          alert(result);
+        },
+        error: function (e) {
+          alert(e);
+        }
+      })
+    }
+  </script>
+</body>
+
+</html>
