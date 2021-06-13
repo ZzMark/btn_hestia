@@ -37,10 +37,18 @@
         alert('delay 不合法')
         return;
       }
-      $.get(`${baseUrl}/power_btn?delay=${delay}`, function (data) {
-        console.log('data', data)
-        alert(data)
-      });
+      $.ajax({
+        dataType: "text",
+        url: `${baseUrl}/power_btn?delay=${delay}`,
+        data: $('#form1').serialize(),
+        success: function (result) {
+          console.log(result);
+          alert(result);
+        },
+        error: function (e) {
+          alert(e);
+        }
+      })
     })
 
     // 下发配置部分
@@ -60,9 +68,8 @@
 
     function login() {
       $.ajax({
-        //几个参数需要注意一下
-        type: "POST",//方法类型
-        dataType: "text",//预期服务器返回的数据类型
+        type: "POST",
+        dataType: "text",
         url: `${baseUrl}/mqtt`,
         data: $('#form1').serialize(),
         success: function (result) {

@@ -452,7 +452,7 @@ void setup()
               AsyncWebParameter *delayParam = request->getParam("delay");
               Serial.printf("[GET] /power_btn delay: %s \r\n", delayParam->value().c_str());
               unsigned long delay = strtoul(delayParam->value().c_str(), NULL, 0);
-              if (power_btn(delay))
+              if (!power_btn(delay))
               {
                 char *body = (char *)malloc(24);
                 sprintf(body, "delay error. %lu", delay);
@@ -552,7 +552,8 @@ void setup()
               strcpy(config.subscribe_topic, subscribe_topic);
               saveConfigData();
               init_mqtt();
-              request->send_P(200, "text/plain", "success");
+              request->send_P(200, "text/plain", "success. 等待设备连接");
+              ESP.restart();
             });
 
   // Start server
